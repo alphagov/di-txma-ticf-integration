@@ -28,6 +28,7 @@ Parameters:
 Conditions:
   ApiCustomDomain: !Not [!Equals [!Ref Environment, dev]]
   DevEnvironment: !Equals [!Ref Environment, dev]
+  BuildEnvironment: !Equals [!Ref Environment, build]
   TestEnvironment:
     !Not [
       !Or [
@@ -886,6 +887,84 @@ Resources:
                 - !Ref TestRoleArn
       Queues:
         - !Ref InitiateAthenaQueryQueue
+
+  QRIntegrationTestsSetupFunction:
+    #checkov:skip=CKV_AWS_115:Defined in Globals section
+    #checkov:skip=CKV_AWS_116:The SQS queue itself will be responsible for its own DLQ
+    #checkov:skip=CKV_AWS_117:VPC not required
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: qrIntegrationTestsSetup.handler
+      Role: !GetAtt QRIntegrationTestsSetupFunctionRole.Arn
+      Environment:
+        Variables:
+          ZENDESK_API_SECRETS_ARN: '{{resolve:ssm:ZendeskSecretSetArn}}'
+      FunctionName: !Sub ${AWS::StackName}-qr-integration-tests-setup
+      KmsKeyArn: '{{resolve:ssm:LambdaKmsKeyArn}}'
+      Events:
+        QRIntegrationTestsTrigggerEvent:
+          Type: SQS
+          Properties:
+            Queue: !Sub 'arn:aws:sqs:${AWS::Region}:{{resolve:ssm:QueryResultsAccountNumber}}:txma-query-results-${Environment}-qr-integration-tests-trigger-queue'
+            BatchSize: 1
+
+  QRIntegrationTestsSetupFunctionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ${AWS::StackName}-${Environment}-qr-integration-tests-setup-role
+      PermissionsBoundary:
+        !If [
+          UsePermissionsBoundary,
+          !Ref PermissionsBoundary,
+          !Ref AWS::NoValue
+        ]
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: AllowQRIntegrationTestsSetupActions
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: Logs
+                Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !GetAtt QRIntegrationTestsSetupLogs.Arn
+              - Sid: ReadSecrets
+                Effect: Allow
+                Action:
+                  - secretsmanager:GetSecretValue
+                Resource:
+                  - '{{resolve:ssm:ZendeskSecretSetArn}}'
+              - Sid: AllowQRIntegrationsTestsTriggerQueueRead
+                Effect: Allow
+                Action:
+                  - sqs:ReceiveMessage
+                  - sqs:DeleteMessage
+                  - sqs:GetQueueAttributes
+                Resource: !Sub 'arn:aws:sqs:${AWS::Region}:{{resolve:ssm:QueryResultsAccountNumber}}:txma-query-results-${Environment}-qr-integration-tests-trigger-queue'
+              - Sid: DecryptKmsKeys
+                Effect: Allow
+                Action:
+                  - kms:Decrypt
+                Resource:
+                  - '{{resolve:ssm:SecretsKmsKeyArn}}'
+                  - !Sub 'arn:aws:kms:${AWS::Region}:{{resolve:ssm:QueryResultsAccountNumber}}:*'
+
+  QRIntegrationTestsSetupLogs:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      KmsKeyId: '{{resolve:ssm:LogsKmsKeyArn}}'
+      LogGroupName: !Sub '/aws/lambda/${AWS::StackName}-qr-integration-tests-setup'
+      RetentionInDays: 30
 
   IntegrationTestsAuditBucketNameParameter:
     Condition: TestEnvironment
